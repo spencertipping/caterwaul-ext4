@@ -251,7 +251,8 @@ meta::meta('type::waul', <<'__');
 meta::functor::editable 'waul', inherit => 1, extension => '.waul', default => 'edit';
 
 __
-meta::alias('es', 'edit sdoc::waul::structures');
+meta::alias('e', 'edit sdoc::waul::ext4');
+meta::alias('etv', 'edit sdoc::js::test-volume');
 meta::alias('tr', 'repl-test-volume');
 meta::bootstrap('html', <<'__');
 <html>
@@ -378,6 +379,11 @@ my ($name, @stuff) = @_;
 @_ ? @stuff ? around_hook('alias', @_, sub {associate("alias::$name", join(' ', @stuff), execute => 1)})
             : retrieve("alias::$name") // "Undefined alias $name"
    : table_display([select_keys('--namespace' => 'alias')], [map retrieve($_), select_keys('--namespace' => 'alias')]);
+
+__
+meta::function('base-waul', <<'__');
+# Runs waul with deps and core source.
+sh("waul -e deps/future.js -e deps/struct.js -e src/ext4.js @_");
 
 __
 meta::function('cat', 'join "\\n", retrieve(@_);');
@@ -624,14 +630,14 @@ sh("waul -e deps/struct.js src/*.waul.sdoc");
 __
 meta::function('repl', <<'__');
 render();
-sh('waul -e deps/struct.js -e src/core.js -e src/structures.js -c js_all');
+base_waul('-c js_all');
 
 __
 meta::function('repl-test-volume', <<'__');
 # Just like repl, but loads a test disk image.
 render();
 with_exported("sdoc::js::test-volume", sub {
-  sh("waul -e deps/struct.js -e src/core.js -e src/structures.js -e '$_[0]' -c js_all")});
+  base_waul("-e '$_[0]' -c js_all")});
 
 __
 meta::function('rm', <<'__');
@@ -1616,29 +1622,30 @@ exists $data{"sdoc::$attribute"} ? sdocp("sdoc::$attribute") : undef;
 __
 meta::sdoc('js::test-volume', <<'__');
 caterwaul.module('ext4.test-volume', 'js_all', function ($) {
-  $s(r) = $.ext4.superblock.decode(b = r('fs').readFileSync('test/test-volume'), 1024)});
+  init(r) = (image                  = r('fs').readFileSync('test/test-volume'),
+             source(offset, length) = $.future()(image.slice(offset, offset + length)),
+             v                      = $.ext4(source))});
 
 __
-meta::sdoc('waul::core', <<'__');
-Core definitions for ext4 module | Spencer Tipping
+meta::sdoc('waul::ext4', <<'__');
+Ext4 filesystem implementation | Spencer Tipping
 Licensed under the terms of the MIT source code license
 
 Introduction.
-This just defines the 'ext4' attribute on Caterwaul. By default, it is a function that decodes an ext4 superblock.
+This module implements a simple asynchronous ext4 driver for node.js Buffer objects and Javascript arrays. You can use this to read and write ext4 volumes stored in files or on block devices,
+and because it is fundamentally asynchronous you can tunnel all of the data over an RPC connection.
 
-caterwaul.module('ext4.core', 'js_all', function ($) {
-  $.ext4(xs, o) = $.ext4.superblock.decode(xs, o || 0)});
+This implementation has a few oddities. First, a lot of ext4 features are unimplemented, including some important ones like journaling. Second, the block allocator is very willing to fragment
+files if it makes the volume more compact. This is at odds with ext4's delayed allocation, block group balancing, and sparse layout. Third, this implementation continuously resizes the volume
+as blocks are allocated and freed. Finally, it allows you to force aspects of extent layout and get low-level information like where a file's data starts. This helps when implementing
+bootloaders.
 
-__
-meta::sdoc('waul::structures', <<'__');
-Structure definitions for ext4 | Spencer Tipping
-Licensed under the terms of the MIT source code license
+caterwaul.module('ext4', 'js_all', function ($) {
 
-Introduction.
-These structure definitions are based on the ones described at http://ext4.wiki.kernel.org. Most of it is straightforward C structure definition.
+Binary data structure definitions.
+These are taken basically verbatim from http://ext4.wiki.kernel.org.
 
-caterwaul.module('ext4.structures', 'js_all', function ($) {
-  $.ext4 /-$.merge/ capture [
+  $.ext4 = "$.ext4.init.apply(this, arguments)".qf /-$.merge/ capture [
 
     superblock      = $.struct().u32l('inodes blocks reserved_blocks free_blocks free_inodes first_data_block log_of_block_size obsolete_log_fragment_size blocks_per_group').
                                  u32l('obsolete_fragments_per_group inodes_per_group mount_time write_time').u16l('mounts max_mounts magic state error_behavior minor_revision_level').
@@ -1679,7 +1686,40 @@ caterwaul.module('ext4.structures', 'js_all', function ($) {
     htree_node      = $.struct().u32l('fake_inode').u16l('fake_record_length').u8('name_length file_type').u16l('limit count').u32l('block'),
     htree_entry     = $.struct().u32l('hash next')]
 
-  -where [must_be(x, y) = x === y || console.log('\033[1;31m >> #{x} was expected to be #{y}\033[0;0m')]});
+  -where [must_be(x, y) = x === y || console.log('\033[1;31m >> #{x} was expected to be #{y}\033[0;0m')],
+
+High-level data structure definitions.
+These parse and manipulate the low-level data structures on disk to provide a structured filesystem interface. The interface presented here is roughly at the same abstraction level as
+something like 9P.
+
+  ($.ext4.init(block_source) = this instanceof $.ext4 ? this -se [it.block_source = block_source] : new $.ext4(block_source)) -se- $.ext4.prototype /-$.merge/ methods()
+
+  -where [methods()                      = capture [superblock() = superblock(this.block_source)],
+
+          superblock(source)             = source(1024, 1024) /~map/ "_ /-become_superblock_given/ source".qf,
+          become_superblock_given(sb, s, sb = result) = $.ext4.superblock.decode(sb)
+                                             /-$.merge/ wcapture [real_block_size()    = sb._real_block_size  || (sb._real_block_size  = 1 << 10 + sb.log_of_block_size),
+                                                                  inodes_per_block()   = sb._blocks_per_inode || (sb._blocks_per_inode = real_block_size() / sb.inode_size >>> 0),
+                                                                  block_group_size()   = sb._block_group_size || (sb._block_group_size = $.ext4.block_group.size()),
+                                                                  block_group_offset() = sb.log_of_block_size ? 1 : 2,
+
+                                                                  read_block(n)        = source(n * real_block_size(), real_block_size()),
+                                                                  read_block_group(n)  = read_block(block_group_offset() + n * block_group_size()) /~map/ "_ /-become_block_group/ sb".qf,
+                                                                  read_inode(n)        = read_block_group((n - 1) / sb.inodes_per_group >>> 0)
+                                                                             /~flat_map/ "_.read_inode((n - 1) % sb.inodes_per_group)".qf,
+
+                                                                  read_first_inode()   = read_inode(sb.first_inode),
+
+                                                                  block_group_count()  = Math.max(1, sb.blocks / sb.blocks_per_group >>> 0),
+                                                                  block_group_map()    = n[block_group_count()] *read_block_group /seq /!$.future],
+
+          become_block_group(g, sb, g = result)       = $.ext4.block_group.decode(g)
+                                             /-$.merge/ wcapture [read_inode(n) = sb.read_block(g.inode_table + (n / sb.inodes_per_block() >>> 0))
+                                                                           /~map/ "_ / (n % sb.inodes_per_block() * sb.inode_size) /-become_inode/ sb".qf],
+
+          become_inode(i, o, sb, i = result)          = $.ext4.inode.decode(i, o)
+                                             /-$.merge/ wcapture [permission_bits() = i.mode & 0xfff,
+                                                                  file_type()       = '#pc#d#b#f#l#s'.charAt(i.mode >>> 12)]]});
 
 __
 meta::template('comment', '\'\';     # A mechanism for line or block comments.');
