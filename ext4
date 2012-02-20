@@ -1696,31 +1696,47 @@ These are taken basically verbatim from http://ext4.wiki.kernel.org.
   -where [must_be(x, y) = x === y || console.log('\033[1;31m >> #{x} was expected to be #{y}\033[0;0m')],
 
 High-level data structure definitions.
-These parse and manipulate the low-level data structures on disk to provide a structured filesystem interface. The interface presented here is roughly at the same abstraction level as
-something like 9P.
+These parse and manipulate the low-level data structures on disk to provide a structured filesystem interface. The interface presented here is pretty low-level and doesn't support things like
+permission checking. The upside to this shallow abstraction is that you can do things like talk to the block allocator directly, which is useful for reducing fragmentation and writing
+bootloaders.
 
-  ($.ext4.init(block_source) = this instanceof $.ext4 ? this -se [it.block_source = block_source] : new $.ext4(block_source)) -se- $.ext4.prototype /-$.merge/ methods()
+To create a filesystem against a node.js buffer called disk_buffer:
 
-  -where [future                                      = $.future,
-          methods()                                   = capture [superblock() = superblock(this.block_source),
-                                                                 root()       = this.superblock() /~flat_map/ "_.read_first_inode()".qf],
+| fs = $.ext4(read, write)
+       -where [read(offset, length) = $.future()(disk_buffer.slice(offset, offset + length)),
+               write(xs, offset)    = xs *![disk_buffer[xi + offset] = x] -seq -then- $.future()(xs.length)]
 
-          superblock(source)                          = source(1024, 1024) /~map/ "_ /-become_superblock_given/ source".qf,
-          become_superblock_given(sb, s, sb = result) = $.ext4.superblock.decode(sb)
-                                             /-$.merge/ wcapture [real_block_size()    = sb._real_block_size  || (sb._real_block_size  = 1 << 10 + sb.log_of_block_size),
-                                                                  inodes_per_block()   = sb._blocks_per_inode || (sb._blocks_per_inode = real_block_size() / sb.inode_size >>> 0),
-                                                                  block_group_size()   = sb._block_group_size || (sb._block_group_size = $.ext4.block_group.size()),
-                                                                  block_group_offset() = sb.log_of_block_size ? 1 : 2,
+In this case all of the futures are resolved immediately, but you can resolve them asynchronously too. Note that neither read() nor write() is allowed to assume anything specific to node.js
+Buffer instances unless you know you're running exclusively on node.js. The reason is that ext4 images should be portable to the browser and accessible via RPC.
 
-                                                                  read_block(n)        = s(n * real_block_size(), real_block_size()),
-                                                                  read_block_group(n)  = read_block(block_group_offset() + n * block_group_size()) /~map/ "_ /-become_block_group/ sb".qf,
-                                                                  read_inode(n)        = read_block_group((n - 1) / sb.inodes_per_group >>> 0)
-                                                                             /~flat_map/ "_.read_inode((n - 1) % sb.inodes_per_group)".qf,
+  ($.ext4.init(read, write) = this instanceof $.ext4 ? this -se [it.read = read, it.write = write] : new $.ext4(read, write)) -se- $.ext4.prototype /-$.merge/ methods()
 
-                                                                  root()               = read_inode(2),                                 // Root directory position is fixed
+  -where [methods()                                = capture [superblock() = superblock(this.read, this.write),
+                                                              root()       = this.superblock() /~flat_map/ "_.root()".qf],
 
-                                                                  block_group_count()  = Math.max(1, sb.blocks / sb.blocks_per_group >>> 0),
-                                                                  block_group_map()    = n[block_group_count()] *read_block_group /seq /!future],
+Locking.
+Some locking needs to happen because not all operations can be completed with just one sequential disk operation (and even if they could, order of disk operations is not well-defined). Each
+inode can be locked independently; this happens when any write operation happens on the inode itself (not the data; access to this is not synchronized in any way). Locking an inode prevents
+the inode, its extent map, and for directories only, its data, from being modified by another request. An inode is locked when a a file is expanded or truncated.
+
+Locks are implemented transparently as flat_map stages in writing futures. That is, for a write operation w() -> future that requires locking:
+
+| lock(w)() = mutex_free_future.flat_map(w)
+
+          superblock(r, w)                         = r(1024, 1024) /~map/ "_ / r /-become_superblock/ w".qf,
+          become_superblock(sb, r, w, sb = result) = $.ext4.superblock.decode(sb)
+                                          /-$.merge/ wcapture [real_block_size()    = sb._real_block_size   || (sb._real_block_size   = 1 << 10 + sb.log_of_block_size),
+                                                               inodes_per_block()   = sb._blocks_per_inode  || (sb._blocks_per_inode  = real_block_size() / sb.inode_size >>> 0),
+                                                               block_group_size()   = sb._block_group_size  || (sb._block_group_size  = $.ext4.block_group.size()),
+                                                               block_group_count()  = sb._block_group_count || (sb._block_group_count = Math.ceil(sb.blocks / sb.blocks_per_group)),
+                                                               block_group_offset() = sb.log_of_block_size ? 1 : 2,
+
+                                                               read_block(n)        = r(n * real_block_size(), real_block_size()),
+                                                               read_block_group(n)  = read_block(block_group_offset() + n * block_group_size()) /~map/ "_ /-become_block_group/ sb".qf,
+                                                               read_inode(n)        = read_block_group((n - 1) / sb.inodes_per_group >>> 0)
+                                                                          /~flat_map/ "_.read_inode((n - 1) % sb.inodes_per_group)".qf,
+
+                                                               root()               = read_inode(2)],                                   // Root directory position is fixed
 
           become_block_group(g, sb, g = result)       = $.ext4.block_group.decode(g)
                                              /-$.merge/ wcapture [read_inode(n) = sb.read_block(g.inode_table + (n / sb.inodes_per_block() >>> 0))
@@ -1732,7 +1748,7 @@ something like 9P.
                                                                   hashed_directory() = i.flags & 0x1000,                                // We don't support these yet
                                                                   file_type()        = '#pc#d#b#f#l#s'.charAt(i.mode >>> 12),           // # means invalid/unknown/deleted
 
-                                                                  data_blocks()      = n[i.block_count] *[data_block(x)] /seq /!future,
+                                                                  data_blocks()      = n[i.block_count] *[data_block(x)] /seq /!$.future,
                                                                   data()             = data_blocks() /~map/ "_ *~![x] -seq -re- it.slice(0, i.size)".qf,
                                                                   read_directory()   = data() /~map/ directory_entries_in,
 
