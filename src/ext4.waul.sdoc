@@ -49,7 +49,7 @@ These are taken basically verbatim from http://ext4.wiki.kernel.org.
     extent_leaf     = $.struct().u32l('block').u16l('length start_high').u32l('start_low'),
 
     // Note that this directory entry structure corresponds to ext4_dir_entry_2, not the original ext4_dir_entry.
-    directory_entry = $.struct().u32l('inode').u16l('record_length').u8('name_length').u8('file_type').ascii('name', 255),
+    directory_entry = $.struct().u32l('inode').u16l('record_length').u8('name_length').u8('file_type').ascii('name')(255),
 
     htree_root      = $.struct().u32l('dot_inode').u16l('dot_record_length').u8('dot_name_length dot_file_type').u8('dot_name', 4).
                                  u32l('dotdot_inode').u16l('dotdot_record_length').u8('dotdot_name_length dotdot_file_type').u8('dotdot_name', 4).
@@ -66,7 +66,8 @@ something like 9P.
 
   ($.ext4.init(block_source) = this instanceof $.ext4 ? this -se [it.block_source = block_source] : new $.ext4(block_source)) -se- $.ext4.prototype /-$.merge/ methods()
 
-  -where [methods()                                   = capture [superblock() = superblock(this.block_source),
+  -where [future                                      = $.future,
+          methods()                                   = capture [superblock() = superblock(this.block_source),
                                                                  root()       = this.superblock() /~flat_map/ "_.read_first_inode()".qf],
 
           superblock(source)                          = source(1024, 1024) /~map/ "_ /-become_superblock_given/ source".qf,
@@ -81,10 +82,10 @@ something like 9P.
                                                                   read_inode(n)        = read_block_group((n - 1) / sb.inodes_per_group >>> 0)
                                                                              /~flat_map/ "_.read_inode((n - 1) % sb.inodes_per_group)".qf,
 
-                                                                  read_first_inode()   = read_inode(sb.first_inode),
+                                                                  root()               = read_inode(2),                                 // Root directory position is fixed
 
                                                                   block_group_count()  = Math.max(1, sb.blocks / sb.blocks_per_group >>> 0),
-                                                                  block_group_map()    = n[block_group_count()] *read_block_group /seq /!$.future],
+                                                                  block_group_map()    = n[block_group_count()] *read_block_group /seq /!future],
 
           become_block_group(g, sb, g = result)       = $.ext4.block_group.decode(g)
                                              /-$.merge/ wcapture [read_inode(n) = sb.read_block(g.inode_table + (n / sb.inodes_per_block() >>> 0))
@@ -96,8 +97,9 @@ something like 9P.
                                                                   hashed_directory() = i.flags & 0x1000,                                // We don't support these yet
                                                                   file_type()        = '#pc#d#b#f#l#s'.charAt(i.mode >>> 12),           // # means invalid/unknown/deleted
 
-                                                                  data_blocks()      = n[i.block_count] *[data_block(x)] /seq /!$.future,
-                                                                  read_directory()   = data_blocks() /~map/ "_ *~![directory_entries_in(x)] -seq".qf,
+                                                                  data_blocks()      = n[i.block_count] *[data_block(x)] /seq /!future,
+                                                                  data()             = data_blocks() /~map/ "_ *~![x] -seq -re- it.slice(0, i.size)".qf,
+                                                                  read_directory()   = data() /~map/ directory_entries_in,
 
                                                                   extent_root()      = i.i_block /-become_extent_tree/ sb,
                                                                   data_block(n)      = extent_root().data_block(n)],
@@ -106,11 +108,11 @@ Directory parsing.
 Right now this driver only supports linear-scan directories; there is no support for ext3/4 htrees yet. Directory entries are stored as variable-sized structures in individual disk blocks;
 each one contains an inode reference. We stop scanning when we hit one with an inode of 0.
 
-          directory_entry(block_data, offset)         = $.ext4.directory_entry.decode(block_data, offset) -se [it.size() = it.record_length],
-          directory_entries_in(block_data)            = null *~![block_data[offset] + block_data[offset + 1] === 0]
-                                                                [result.push(d), offset += d.size(), where [d = directory_entry(block_data, offset)]] /seq
-                                                        -then- result
-                                                        -where [offset = 0, result = []],
+          directory_entry(block_data, offset)         = $.ext4.directory_entry.decode(block_data, offset) -se [it.size() = it.record_length || 8,
+                                                                                                               it.name   = it.name.substr(0, it.name_length)],
+          directory_entries_in(block_data)            = 0 *~![x < block_data.length - 4] [result.push(d), x0 = x, x + d.size(), where [d = directory_entry(block_data, x)]] /seq
+                                                        -then- result %[x.inode] /seq
+                                                        -where [result = []],
 
 Extent tree implementation.
 Extent trees have the desirable property that all immediate children are available synchronously. Constructing each child is an asynchronous operation, as is, obviously, retrieving the data.
@@ -129,4 +131,6 @@ Extent trees have the desirable property that all immediate children are availab
                                                                   data_block(n) = block_data() /~flat_map/ "_.data_block(n)".qf],
 
           become_extent_leaf(e, o, sb, e = result)    = $.ext4.extent_leaf.decode(e, o)
-                                             /-$.merge/ wcapture [data_block(n) = sb.read_block(e.start_low + n - e.block)]]});
+                                             /-$.merge/ wcapture [data_block(n) = sb.read_block(e.start_low + n - e.block)]],
+
+  where [fail(reason) = raise [new Error(reason)]]});
