@@ -1621,10 +1621,14 @@ my $attribute = attribute($_[0]);
 exists $data{"sdoc::$attribute"} ? sdocp("sdoc::$attribute") : undef;
 __
 meta::sdoc('js::test-volume', <<'__');
-caterwaul.module('ext4.test-volume', 'js_all', function ($) {
-  init(r) = (image                  = r('fs').readFileSync('test/test-volume'),
-             source(offset, length) = $.future()(image.slice(offset, offset + length)),
-             v                      = $.ext4(source))});
+caterwaul.module('ext4.test-volume', function ($) {
+  image    = require('fs').readFileSync('test/test-volume'),
+  source   = function (offset, length) {return $.future()(image.slice(offset, offset + length))},
+  v        = $.ext4(source),
+
+  // This works only because all futures are immediately resolved
+  sb       = v.superblock().decided[0],
+  root     = sb.read_first_inode().decided[0]});
 
 __
 meta::sdoc('waul::ext4', <<'__');
@@ -1639,6 +1643,8 @@ This implementation has a few oddities. First, a lot of ext4 features are unimpl
 files if it makes the volume more compact. This is at odds with ext4's delayed allocation, block group balancing, and sparse layout. Third, this implementation continuously resizes the volume
 as blocks are allocated and freed. Finally, it allows you to force aspects of extent layout and get low-level information like where a file's data starts. This helps when implementing
 bootloaders.
+
+Right now it doesn't implement hashed directories, but in the future I will probably implement this.
 
 caterwaul.module('ext4', 'js_all', function ($) {
 
@@ -1672,7 +1678,7 @@ These are taken basically verbatim from http://ext4.wiki.kernel.org.
                  -se- it.size() /-must_be/ 156,
 
     block_map       = $.struct().u32l('direct', 12).u32l('indirect_block_1 indirect_block_2 indirect_block_3'),
-    extent_tree     = $.struct().u16l('magic entries max header').u32l('generation'),
+    extent_tree     = $.struct().u16l('magic entries max depth').u32l('generation'),
     extent_index    = $.struct().u32l('block leaf').u16l('leaf_high unused'),
     extent_leaf     = $.struct().u32l('block').u16l('length start_high').u32l('start_low'),
 
@@ -1718,8 +1724,45 @@ something like 9P.
                                                                            /~map/ "_ / (n % sb.inodes_per_block() * sb.inode_size) /-become_inode/ sb".qf],
 
           become_inode(i, o, sb, i = result)          = $.ext4.inode.decode(i, o)
-                                             /-$.merge/ wcapture [permission_bits() = i.mode & 0xfff,
-                                                                  file_type()       = '#pc#d#b#f#l#s'.charAt(i.mode >>> 12)]]});
+                                             /-$.merge/ wcapture [permission_bits()  = i.mode & 0xfff,
+                                                                  extents_enabled()  = i.flags & 0x80000,
+                                                                  hashed_directory() = i.flags & 0x1000,
+                                                                  file_type()        = '#pc#d#b#f#l#s'.charAt(i.mode >>> 12),           // # means invalid/unknown/deleted
+
+                                                                  data_blocks()      = n[i.block_count] *[data_block(x)] /seq /!$.future,
+                                                                  read_directory()   = data_blocks() /~map/ "_ *~![directory_entries_in(x)] -seq".qf,
+
+                                                                  extent_root()      = i.i_blocks /-become_extent_tree/ sb,
+                                                                  data_block(n)      = extent_root().data_block(n)],
+
+Directory parsing.
+Right now this driver only supports linear-scan directories; there is no support for ext3/4 htrees yet. Directory entries are stored as variable-sized structures in individual disk blocks;
+each one contains an inode reference. We stop scanning when we hit one with an inode of 0.
+
+          directory_entry(block_data, offset)         = $.ext4.directory_entry.decode(block_data, offset) -se [it.size() = it.record_length],
+          directory_entries_in(block_data)            = null *~![block_data[offset] + block_data[offset + 1] === 0]
+                                                                [result.push(d), offset += d.size(), where [d = directory_entry(block_data, offset)]] /seq
+                                                        -then- result
+                                                        -where [offset = 0, result = []],
+
+Extent tree implementation.
+Extent trees have the desirable property that all immediate children are available synchronously. Constructing each child is an asynchronous operation, as is, obviously, retrieving the data.
+
+          become_extent_tree(e, sb, t = result)       = $.ext4.extent_tree.decode(e)
+                                             /-$.merge/ wcapture [child_structure() = t._child_structure || (t._child_structure = t.depth ? "e / _ /-become_extent_index/ sb".qf
+                                                                                                                                          : "e / _ /-become_extent_leaf/  sb".qf),
+
+                                                                  children()        = n[t.entries] *[child_structure()($.ext4.extent_tree.size() + xi * 12)] -seq,
+
+                                                                  container_of(b)   = next |[x.block > b ? x0 : (x0 = x, false)] |seq |or [next[next.length - 1]] |where [next = children()],
+                                                                  data_block(n)     = container_of(n).data_block(n)],
+
+          become_extent_index(e, o, sb, e = result)   = $.ext4.extent_index.decode(e, o)
+                                             /-$.merge/ wcapture [block_data()  = sb.read_block(e.leaf) /-become_extent_tree/ sb,
+                                                                  data_block(n) = block_data() /~flat_map/ "_.data_block(n)".qf],
+
+          become_extent_leaf(e, o, sb, e = result)    = $.ext4.extent_leaf.decode(e, o)
+                                             /-$.merge/ wcapture [data_block(n) = sb.read_block(e.start_low + n - e.block)]]});
 
 __
 meta::template('comment', '\'\';     # A mechanism for line or block comments.');
