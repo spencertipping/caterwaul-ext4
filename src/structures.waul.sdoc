@@ -7,18 +7,18 @@ These structure definitions are based on the ones described at http://ext4.wiki.
 caterwaul.module('ext4.structures', 'js_all', function ($) {
   $.ext4 /-$.merge/ capture [
 
-    superblock      = $.struct().u32l('inodes blocks reserved_blocks free_blocks free_inodes first_data_block log_of_block_size obsolete_log_fragment_size blocks_per_group inodes_per_group').
-                                 u32l('mount_time write_time').u16l('mounts max_mounts magic state error_behavior minor_revision_level').
+    superblock      = $.struct().u32l('inodes blocks reserved_blocks free_blocks free_inodes first_data_block log_of_block_size obsolete_log_fragment_size blocks_per_group').
+                                 u32l('obsolete_fragments_per_group inodes_per_group mount_time write_time').u16l('mounts max_mounts magic state error_behavior minor_revision_level').
                                  u32l('last_check check_interval creator_os revision_level').u16l('default_uid default_gid').u32l('first_inode').u16l('inode_size block_group_number').
-                                 u32l('feature_compatible feature_incompatible feature_ro_compatible').u8('uuid', 16).u8('volume_name', 16).u8('last_mounted', 64).
+                                 u32l('feature_compatible feature_incompatible feature_ro_compatible').ascii('uuid')(16).ascii('volume_name')(16).ascii('last_mounted')(64).
                                  u32l('algorithm_usage_bitmap').u8('preallocate_blocks preallocate_dir_blocks').u16l('reserved_gdt_blocks').u8('journal_uuid', 16).
-                                 u32l('journal_inode journal_device last_orphan hash_seed').u8('default_hash_version jni_backup_type').u16l('group_descriptor_size').
+                                 u32l('journal_inode journal_device last_orphan').u32l('hash_seed', 4).u8('default_hash_version jni_backup_type').u16l('group_descriptor_size').
                                  u32l('default_mount_options first_meta_block_group mkfs_time').u32l('journal_block_backup', 17).u32l('blocks_high reserved_blocks_high free_blocks_high').
                                  u16l('minimum_inode_size inode_reserve_size').u32l('flags').u16l('raid_stride mmp_interval').u32l('mmp_block', 2).u32l('raid_stripe_width').
                                  u8('log_of_flexible_block_group_size').u8('reserved_char_pad').u16l('reserved_pad').u32l('kb_written', 2).u32l('snapshot_inode snapshot_id').
                                  u32l('snapshot_reserved_block_count', 2).u32l('snapshot_list_inode error_count first_error_time').u32l('first_error_inode').u32l('first_error_block', 2).
-                                 u8('first_error_function', 32).u32l('first_error_line last_error_time last_error_inode last_error_line').u32l('last_error_block', 2).
-                                 u8('last_error_function', 32).u8('mount_options', 64).u32l('user_quota_inode group_quota_inode overhead_blocks checksum').u32l('reserved', 108)
+                                 ascii('first_error_function')(32).u32l('first_error_line last_error_time last_error_inode last_error_line').u32l('last_error_block', 2).
+                                 ascii('last_error_function')(32).ascii('mount_options')(64).u32l('user_quota_inode group_quota_inode overhead_blocks checksum').u32l('reserved', 108)
                  -se- it.size() /-must_be/ 1024,
 
     block_group     = $.struct().u32l('block_bitmap inode_bitmap inode_table').u16l('free_block_count free_inode_count used_directory_count flags').u32l('reserved', 2).
@@ -37,7 +37,7 @@ caterwaul.module('ext4.structures', 'js_all', function ($) {
     extent_leaf     = $.struct().u32l('block').u16l('length start_high').u32l('start_low'),
 
     // Note that this directory entry structure corresponds to ext4_dir_entry_2, not the original ext4_dir_entry.
-    directory_entry = $.struct().u32l('inode').u16l('record_length').u8('name_length').u8('file_type'),
+    directory_entry = $.struct().u32l('inode').u16l('record_length').u8('name_length').u8('file_type').ascii('name', 255),
 
     htree_root      = $.struct().u32l('dot_inode').u16l('dot_record_length').u8('dot_name_length dot_file_type').u8('dot_name', 4).
                                  u32l('dotdot_inode').u16l('dotdot_record_length').u8('dotdot_name_length dotdot_file_type').u8('dotdot_name', 4).
@@ -46,4 +46,4 @@ caterwaul.module('ext4.structures', 'js_all', function ($) {
     htree_node      = $.struct().u32l('fake_inode').u16l('fake_record_length').u8('name_length file_type').u16l('limit count').u32l('block'),
     htree_entry     = $.struct().u32l('hash next')]
 
-  -where [must_be(x, y) = x === y || raise[new Error('#{x} was expected to be #{y}')]]});
+  -where [must_be(x, y) = x === y || console.log('\033[1;31m >> #{x} was expected to be #{y}\033[0;0m')]});
