@@ -1,0 +1,8 @@
+Core definitions for ext4 module | Spencer Tipping
+Licensed under the terms of the MIT source code license
+
+Introduction.
+This just defines the 'ext4' attribute on Caterwaul. By default, it is a function that decodes an ext4 superblock.
+
+caterwaul.module('ext4.core', 'js_all', function ($) {
+  $.ext4(xs, o) = $.ext4.superblock.decode(xs, o || 0)});
