@@ -10,7 +10,10 @@ files if it makes the volume more compact. This is at odds with ext4's delayed a
 as blocks are allocated and freed. Finally, it allows you to force aspects of extent layout and get low-level information like where a file's data starts. This helps when implementing
 bootloaders.
 
-Right now it doesn't implement hashed directories, but in the future I will probably implement this.
+Right now it doesn't implement hashed directories, but in the future I will probably implement this. Also, no aspect of this implementation is spectacularly well-optimized. You'll get much
+better performance from the native driver, obviously. Finally, there is no support for 64-bit anything. In fact, this driver will probably die as soon as your ext4 volume reaches 2GB, maybe
+4GB. The reason is that Javascript doesn't support large integral types and ultimately its libraries are written for integers, not floats. (I'll need to investigate whether this matters in
+node.js.)
 
 caterwaul.module('ext4', 'js_all', function ($) {
 
@@ -84,9 +87,12 @@ Some locking needs to happen because not all operations can be completed with ju
 inode can be locked independently; this happens when any write operation happens on the inode itself (not the data; access to this is not synchronized in any way). Locking an inode prevents
 the inode, its extent map, and for directories only, its data, from being modified by another request. An inode is locked when a file is expanded or truncated.
 
-Locks are implemented transparently as flat_map stages in writing futures. That is, for a write operation w() -> future that requires locking:
+Locks are implemented transparently as flat_map stages in read and write futures. That is, for a write operation w() -> future that requires locking:
 
-| lock(w)() = mutex_free_future.flat_map(w)
+| lock(w)() = current_write_operation.flat_map(w)
+
+The superblock manages all locking for the filesystem by using a mapping from lock domain (e.g. inode, data block) to write future. Inode locks are prefixed with 'i', data block locks are
+prefixed with 'd'; all numbers are in base 10 because base-10 conversion is significantly faster than base-16 conversion in Javascript.
 
           superblock(r, w)                         = r(1024, $.ext4.superblock.size()) /~map/ "_ / r /-become_superblock/ w".qf,
           become_superblock(sb, r, w, sb = result) = $.ext4.superblock.decode(sb)
@@ -103,9 +109,38 @@ Locks are implemented transparently as flat_map stages in writing futures. That 
 
                                                                root()               = read_inode(2)],                                   // Root directory position is fixed
 
+Block groups and allocation.
+If possible, inodes and their data are allocated in the same block group as per the ext4 heuristic. This increases data locality. However, there are cases when this isn't possible. When this
+happens, the block group asks the superblock to allocate one or more extents for some data. The superblock finds a block group with free space and uses that, creating a new block group if
+necessary.
+
+Unlike the native ext4 implementation, this one does not load-balance blocks among block groups. In general, it does the opposite: it will try as hard as it can to front-load data into the
+first block group, spilling over only as necessary. The reason it does this is that it makes it easier to shrink the filesystem once two block groups can be merged (this property is observed
+by checking the free inode and block counts).
+
+By default, ext4 filesystems place the inode and data block bitmaps after the reserved group descriptor table space. This limits the amount of growth that can happen since at some point the
+group descriptor table will collide with the bitmaps. To fix this, this implementation allocates the bitmaps at the end of a block group and allocates blocks starting at the end. In other
+words, here's the traditional layout:
+
+| |- 1024 bytes empty -| |- superblock -| |- block group 0 descriptor -| ... |- block group 0 block bitmap -| |- block group 0 inode bitmap -| |- inodes ... -| |- blocks ... -|
+
+Here's what this implementation does instead:
+
+| |- 1024 bytes empty -| |- superblock -| |- block group 0 descriptor -| ... |- blocks ... -| |- inodes ... -| |- block group 0 inode bitmap -| |- block group 0 block bitmap -|
+
+This also provides some flexibility about expanding the block groups themselves, since the size of each bitmap is limited to one disk block (so the cost to move a bitmap is not that high).
+Right now the implementation doesn't support resizing a block group, but I may implement this in the future.
+
           become_block_group(g, sb, g = result)       = $.ext4.block_group.decode(g)
-                                             /-$.merge/ wcapture [read_inode(n) = sb.read_block(g.inode_table + (n / sb.inodes_per_block() >>> 0))
-                                                                           /~map/ "_ / (n % sb.inodes_per_block() * sb.inode_size) /-become_inode/ sb".qf],
+                                             /-$.merge/ wcapture [read_inode(n)     = sb.read_block(g.inode_table + (n / sb.inodes_per_block() >>> 0))
+                                                                               /~map/ "_ / (n % sb.inodes_per_block() * sb.inode_size) /-become_inode/ sb".qf,
+
+                                                                  next_free(bitmap) = real_offset *~![b & 0x80][b <<= 1, x + 1] -seq -where [byte_index  = bitmap |[x !== 0xff && xi + 1] |seq,
+                                                                                                                                             real_offset = byte_index - 1 << 3,
+                                                                                                                                             b           = bitmap[byte_index - 1]],
+
+                                                                  next_free_inode() = sb.read_block(g.inode_bitmap) /~map/ "next_free(_)".qf,
+                                                                  next_free_block() = sb.read_block(g.block_bitmap) /~map/ "next_free(_)".qf],
 
           become_inode(i, o, sb, i = result)          = $.ext4.inode.decode(i, o)
                                              /-$.merge/ wcapture [permission_bits()  = i.mode & 0xfff,
