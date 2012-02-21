@@ -6,7 +6,7 @@ return($.merge(function(_) {return $.ext4.init.apply(this,arguments) } , {superb
 return{superblock:function() {;
 return superblock(this.read,this.write) } ,root:function() {;
 return(this.superblock() ) .flat_map(function(_) {return _.root() } ) } } } ,superblock=function(r,w) {;
-return(r(1024,1024) ) .map(function(_) {return become_superblock(_,r,w) } ) } ,become_superblock=function(sb,r,w) {;
+return(r(1024,$.ext4.superblock.size() ) ) .map(function(_) {return become_superblock(_,r,w) } ) } ,become_superblock=function(sb,r,w) {;
 var result=$.merge($.ext4.superblock.decode(sb) , (function( ) {var real_block_size=function() {;
 return sb._real_block_size|| (sb._real_block_size=1<<10+sb.log_of_block_size) } ,inodes_per_block=function() {;
 return sb._blocks_per_inode|| (sb._blocks_per_inode=real_block_size() /sb.inode_size>>>0) } ,block_group_size=function() {;

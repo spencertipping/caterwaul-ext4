@@ -82,13 +82,13 @@ Buffer instances unless you know you're running exclusively on node.js. The reas
 Locking.
 Some locking needs to happen because not all operations can be completed with just one sequential disk operation (and even if they could, order of disk operations is not well-defined). Each
 inode can be locked independently; this happens when any write operation happens on the inode itself (not the data; access to this is not synchronized in any way). Locking an inode prevents
-the inode, its extent map, and for directories only, its data, from being modified by another request. An inode is locked when a a file is expanded or truncated.
+the inode, its extent map, and for directories only, its data, from being modified by another request. An inode is locked when a file is expanded or truncated.
 
 Locks are implemented transparently as flat_map stages in writing futures. That is, for a write operation w() -> future that requires locking:
 
 | lock(w)() = mutex_free_future.flat_map(w)
 
-          superblock(r, w)                         = r(1024, 1024) /~map/ "_ / r /-become_superblock/ w".qf,
+          superblock(r, w)                         = r(1024, $.ext4.superblock.size()) /~map/ "_ / r /-become_superblock/ w".qf,
           become_superblock(sb, r, w, sb = result) = $.ext4.superblock.decode(sb)
                                           /-$.merge/ wcapture [real_block_size()    = sb._real_block_size   || (sb._real_block_size   = 1 << 10 + sb.log_of_block_size),
                                                                inodes_per_block()   = sb._blocks_per_inode  || (sb._blocks_per_inode  = real_block_size() / sb.inode_size >>> 0),
