@@ -77,22 +77,34 @@ To create a filesystem against a node.js buffer called disk_buffer:
 In this case all of the futures are resolved immediately, but you can resolve them asynchronously too. Note that neither read() nor write() is allowed to assume anything specific to node.js
 Buffer instances unless you know you're running exclusively on node.js. The reason is that ext4 images should be portable to the browser and accessible via RPC.
 
+Note that the superblock is always assumed to be positioned at 1024 bytes from the beginning of the block device. For cases where this assumption is incorrect, you should provide read/write
+functions that translate the addresses they receive so that the superblock is positioned correctly.
+
   ($.ext4.init(read, write) = this instanceof $.ext4 ? this -se [it.read = read, it.write = write] : new $.ext4(read, write)) -se- $.ext4.prototype /-$.merge/ methods()
 
   -where [methods()                                = capture [superblock() = superblock(this.read, this.write),
                                                               root()       = this.superblock() /~flat_map/ "_.root()".qf],
 
-Locking.
+Locking and mutation.
 Some locking needs to happen because not all operations can be completed with just one sequential disk operation (and even if they could, order of disk operations is not well-defined). Each
 inode can be locked independently; this happens when any write operation happens on the inode itself (not the data; access to this is not synchronized in any way). Locking an inode prevents
 the inode, its extent map, and for directories only, its data, from being modified by another request. An inode is locked when a file is expanded or truncated.
 
-Locks are implemented transparently as flat_map stages in read and write futures. That is, for a write operation w() -> future that requires locking:
+The superblock manages all locking for the filesystem by using a mapping from lock domain (e.g. inode, data block) to write future. This is done using two sparse arrays and a few spare locks
+to manage superblock and block group locking.
 
-| lock(w)() = current_write_operation.flat_map(w)
+Every filesystem object (e.g. inode, data block, etc) is decoded from disk eagerly when it is requested. That is, it is returned in a future that will resolve when the IO is complete, but when
+that future is delivered, its data has already been decoded by the Caterwaul struct library. This works great for read-only filesystem access, but it will lead to errors when there are
+writers. To deal with this, each object provides a transactional mutator that lets you retrieve and optionally update the object.
 
-The superblock manages all locking for the filesystem by using a mapping from lock domain (e.g. inode, data block) to write future. Inode locks are prefixed with 'i', data block locks are
-prefixed with 'd'; all numbers are in base 10 because base-10 conversion is significantly faster than base-16 conversion in Javascript.
+A consequence of this design is that every object knows something about (1) where it is on disk, and (2) which locks cover it. This is problematic for things like online defragmentation or
+relocation (see "Block groups and allocation" below), which might move an object whose state is cached in memory. (The result of this would be that you'd get the wrong data if you tried to
+read from the object, since the extent tree would be coming from deallocated or reallocated blocks.) Even worse, there isn't a way for the superblock to inform the object about its relocation
+because Javascript doesn't support weak references (and I'm unwilling to require users of the library to explicitly free inode references). Further, even the disk itself can't be used to
+inform an inode of its relocation because there may be multiple references to the same inode floating around (so there would be no way to garbage-collect the disk marker).
+
+          unlocked                                 = $.future().finalize(null),
+          componentwise_lock(table = {})(k)(f)     = table[k] = (table[k] || unlocked) /~flat_map/ f /~push/ "delete table[k]".qf,
 
           superblock(r, w)                         = r(1024, $.ext4.superblock.size()) /~map/ "_ / r /-become_superblock/ w".qf,
           become_superblock(sb, r, w, sb = result) = $.ext4.superblock.decode(sb)
@@ -101,6 +113,9 @@ prefixed with 'd'; all numbers are in base 10 because base-10 conversion is sign
                                                                block_group_size()   = sb._block_group_size  || (sb._block_group_size  = $.ext4.block_group.size()),
                                                                block_group_count()  = sb._block_group_count || (sb._block_group_count = Math.ceil(sb.blocks / sb.blocks_per_group)),
                                                                block_group_offset() = sb.log_of_block_size ? 1 : 2,
+
+                                                               lock_inode           = componentwise_lock(),
+                                                               lock_data            = componentwise_lock(),
 
                                                                read_block(n)        = r(n * real_block_size(), real_block_size()),
                                                                read_block_group(n)  = read_block(block_group_offset() + n * block_group_size()) /~map/ "_ /-become_block_group/ sb".qf,
