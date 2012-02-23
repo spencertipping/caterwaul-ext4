@@ -1749,6 +1749,10 @@ inform an inode of its relocation because there may be multiple references to th
                                                                block_group_count()  = sb._block_group_count || (sb._block_group_count = Math.ceil(sb.blocks / sb.blocks_per_group)),
                                                                block_group_offset() = sb.log_of_block_size ? 1 : 2,
 
+                                                               toplevel_locks       = componentwise_lock(),
+                                                               lock_superblock      = toplevel_locks('superblock'),
+                                                               lock_block_group(n)  = toplevel_locks('block_group_#{n}'),
+
                                                                lock_inode           = componentwise_lock(),
                                                                lock_data            = componentwise_lock(),
 
@@ -1760,26 +1764,7 @@ inform an inode of its relocation because there may be multiple references to th
                                                                root()               = read_inode(2)],                                   // Root directory position is fixed
 
 Block groups and allocation.
-If possible, inodes and their data are allocated in the same block group as per the ext4 heuristic. This increases data locality. However, there are cases when this isn't possible. When this
-happens, the block group asks the superblock to allocate one or more extents for some data. The superblock finds a block group with free space and uses that, creating a new block group if
-necessary.
-
-Unlike the native ext4 implementation, this one does not load-balance blocks among block groups. In general, it does the opposite: it will try as hard as it can to front-load data into the
-first block group, spilling over only as necessary. The reason it does this is that it makes it easier to shrink the filesystem once two block groups can be merged (this property is observed
-by checking the free inode and block counts).
-
-By default, ext4 filesystems place the inode and data block bitmaps after the reserved group descriptor table space. This limits the amount of growth that can happen since at some point the
-group descriptor table will collide with the bitmaps. To fix this, this implementation allocates the bitmaps at the end of a block group and allocates blocks starting at the end. In other
-words, here's the traditional layout:
-
-| |- 1024 bytes empty -| |- superblock -| |- block group 0 descriptor -| ... |- block group 0 block bitmap -| |- block group 0 inode bitmap -| |- inodes ... -| |- blocks ... -|
-
-Here's what this implementation does instead:
-
-| |- 1024 bytes empty -| |- superblock -| |- block group 0 descriptor -| ... |- blocks ... -| |- inodes ... -| |- block group 0 inode bitmap -| |- block group 0 block bitmap -|
-
-This also provides some flexibility about expanding the block groups themselves, since the size of each bitmap is limited to one disk block (so the cost to move a bitmap is not that high).
-Right now the implementation doesn't support resizing a block group, but I may implement this in the future.
+All blocks belong to the same block group.
 
           become_block_group(g, sb, g = result)       = $.ext4.block_group.decode(g)
                                              /-$.merge/ wcapture [read_inode(n)     = sb.read_block(g.inode_table + (n / sb.inodes_per_block() >>> 0))

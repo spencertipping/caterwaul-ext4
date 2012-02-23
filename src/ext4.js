@@ -15,12 +15,13 @@ return sb._real_block_size|| (sb._real_block_size=1<<10+sb.log_of_block_size) } 
 return sb._blocks_per_inode|| (sb._blocks_per_inode=real_block_size() /sb.inode_size>>>0) } ,block_group_size=function() {;
 return sb._block_group_size|| (sb._block_group_size=$.ext4.block_group.size() ) } ,block_group_count=function() {;
 return sb._block_group_count|| (sb._block_group_count=Math.ceil(sb.blocks/sb.blocks_per_group) ) } ,block_group_offset=function() {;
-return sb.log_of_block_size?1:2} ,lock_inode=componentwise_lock() ,lock_data=componentwise_lock() ,read_block=function(n) {;
+return sb.log_of_block_size?1:2} ,toplevel_locks=componentwise_lock() ,lock_superblock=toplevel_locks( 'superblock' ) ,lock_block_group=function(n) {;
+return toplevel_locks( ( 'block_group_' + (n) + '' ) ) } ,lock_inode=componentwise_lock() ,lock_data=componentwise_lock() ,read_block=function(n) {;
 return r(n*real_block_size() ,real_block_size() ) } ,read_block_group=function(n) {;
 return(read_block(block_group_offset() +n*block_group_size() ) ) .map(function(_) {return become_block_group(_,sb) } ) } ,read_inode=function(n) {;
 return(read_block_group( (n-1) /sb.inodes_per_group>>>0) ) .flat_map(function(_) {return _.read_inode( (n-1) %sb.inodes_per_group) } ) } ,root=function() {;
 return read_inode(2) } ;
-return( {real_block_size:real_block_size,inodes_per_block:inodes_per_block,block_group_size:block_group_size,block_group_count:block_group_count,block_group_offset:block_group_offset,lock_inode:lock_inode,lock_data:lock_data,read_block:read_block,read_block_group:read_block_group,read_inode:read_inode,root:root} ) } ) .call(this) ) ;
+return( {real_block_size:real_block_size,inodes_per_block:inodes_per_block,block_group_size:block_group_size,block_group_count:block_group_count,block_group_offset:block_group_offset,toplevel_locks:toplevel_locks,lock_superblock:lock_superblock,lock_block_group:lock_block_group,lock_inode:lock_inode,lock_data:lock_data,read_block:read_block,read_block_group:read_block_group,read_inode:read_inode,root:root} ) } ) .call(this) ) ;
 var sb=result;
 return result} ,become_block_group=function(g,sb) {;
 var result=$.merge($.ext4.block_group.decode(g) , (function( ) {var read_inode=function(n) {;
